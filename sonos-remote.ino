@@ -32,16 +32,27 @@
 
 
 /* D E F I N E S *********************************************************************************/
+/* Pinout */
 #define PIN_IN_KY40_CLK                     (4)
 #define PIN_IN_KY40_DT                      (2)
 #define PIN_IN_KY40_BUTTON                  (15)
+#define PIN_IN_PLAY_BUTTON                  (13)
 
+/* Logical */
+#define BUTTON_RELEASED                     (1)
+#define BUTTON_PUSHED                       (0)
+
+/* Sonos settings */
 #define STEP_VOLUME                         (2)
 
-#define LATEST_REFRESH_SONOS_TIMEOUT_MS     (60000)
-#define TIMER_DATA_TRANSMIT_TIMEOUT_MS      (200)
-
+/* Debug mode : if uncommented, do not send command, just display information in the console */
 //#define _DEBUG_MODE
+
+/* Timers */
+#define TIMER_IS_STOPED                     (0)
+#define TIMER_TRANSMIT_DATA_MS              (200)
+#define TIMER_REFRESH_SONOS_STATUS_MS       (60000)
+
 
 
 /* P R O T O T Y P E S ***************************************************************************/
@@ -50,24 +61,29 @@ void ethConnectError();
 
 /* S T R U C T U R E S ***************************************************************************/
 typedef struct {
-  bool antiRebound    = false;
-  bool newPosition    = false;
-  int16_t pinCLKLast  = LOW;
-  int16_t diff        = 0;
-  int16_t pos         = 0;
+  int16_t pinButtonLast = BUTTON_RELEASED;
+  int16_t pinCLKLast    = LOW;
+  int16_t diff          = 0;
 } ky40Data;
 
 
 /* D E C L A R A T I O N S ***********************************************************************/
+/* Wifi device */
 WiFiClient client;
+
+/* IO device */
+int8_t pinPlayButtonLast = BUTTON_RELEASED;
+
+/* Sonos device */
+int16_t currentVolume = 0;
+unsigned long timerToTransmitData_ms = TIMER_IS_STOPED;
+unsigned long timerToRefreshSonos_ms = millis();
 SonosUPnP sonosDevice = SonosUPnP(client, ethConnectError);
 IPAddress sonosDeviceIP(sonos_ip_addr[0], sonos_ip_addr[1], sonos_ip_addr[2], sonos_ip_addr[3]);
-ky40Data ky40;
-int16_t currentVolume = 0;
-uint32_t elapsedTimeLatestRefreshSonos_ms = LATEST_REFRESH_SONOS_TIMEOUT_MS;
-unsigned long timerDataTransmit_ms = 0;
-bool updateMute = false;
-bool updateVolume = false;
+
+/* Rotary internal data */
+volatile ky40Data ky40;
+
 
 
 /* E T H  F U N C T I O N S **********************************************************************/
@@ -77,42 +93,8 @@ void ethConnectError (void)
 }
 
 
+
 /* K Y 4 0  F U N C T I O N S ********************************************************************/
-void ky40_refresh (void)
-{
-  int16_t pinCLK = digitalRead(PIN_IN_KY40_CLK);
-  
-  if (pinCLK != ky40.pinCLKLast)
-  {
-    ky40.newPosition = true;
-    
-    if (digitalRead(PIN_IN_KY40_DT) != pinCLK)
-    {
-      ky40.diff++;
-      ky40.pos++;
-    }
-    else
-    {
-      ky40.diff--;
-      ky40.pos--;
-
-      if (ky40.pos < 0)
-      {
-        ky40.pos = 0;
-      }
-    }
-  }    
-  
-  ky40.pinCLKLast = pinCLK;
-}
-
-/*-----------------------------------------------------------------------------------------------*/
-bool ky40_getButtonStatus (void)
-{
-  return !digitalRead(PIN_IN_KY40_BUTTON);
-}
-
-/*-----------------------------------------------------------------------------------------------*/
 int32_t ky40_getRotaryDiff (void)
 {
   int32_t retval = ky40.diff;
@@ -120,141 +102,162 @@ int32_t ky40_getRotaryDiff (void)
   return retval;
 }
 
-/*-----------------------------------------------------------------------------------------------*/
-int32_t ky40_getRotaryPosition (void)
+
+
+/* S O N O S *************************************************************************************/
+void update_mute (void)
 {
-  return ky40.pos;
+  int8_t muteButtonState = digitalRead(PIN_IN_KY40_BUTTON);
+  
+  if (muteButtonState == BUTTON_PUSHED)
+  {
+    /* Anti rebound check */
+    if (ky40.pinButtonLast == BUTTON_RELEASED)
+    {
+      #ifndef _DEBUG_MODE
+        sonosDevice.setMute (sonosDeviceIP, !sonosDevice.getMute (sonosDeviceIP));
+      #endif
+      
+      Serial.println ("sonosDevice.setMute");
+    }
+  }
+
+  /* Update button status for anti rebound */
+  ky40.pinButtonLast = muteButtonState;
 }
 
 /*-----------------------------------------------------------------------------------------------*/
-bool ky40_rotaryPositionChanged (void)
+void update_volume (void)
 {
-  bool retval = ky40.newPosition;
-  ky40.newPosition = false;
-  return retval;
+  int16_t rotaryDiff = ky40_getRotaryDiff();
+  
+  /* Update volume according rotary position */ 
+  if (rotaryDiff != 0)
+  {
+    /* Set new volume level */
+    currentVolume += (rotaryDiff*STEP_VOLUME);
+    
+    if (currentVolume < 0)
+    {
+      currentVolume = 0;
+    }
+
+    /* We start/reset the timer to refresh volume when user will have finish to change volume */
+    timerToTransmitData_ms = millis();
+
+    /* To avoid conflict with user actions, we resset the sonos status update timer */
+    timerToRefreshSonos_ms = millis();
+  }
+
+  /* If time was started and reached, we send commnand */
+  if ((timerToTransmitData_ms != TIMER_IS_STOPED) && ((millis()-timerToTransmitData_ms) > TIMER_TRANSMIT_DATA_MS))
+  {
+    /* We stop the timer */
+    timerToTransmitData_ms = TIMER_IS_STOPED;
+    
+    #ifndef _DEBUG_MODE
+      sonosDevice.setVolume(sonosDeviceIP, currentVolume);
+    #endif
+    
+    Serial.print ("sonosDevice.setVolume = ");
+    Serial.println ((int)(currentVolume));
+  }
+
+  /* Because volume can manage by an external remote, we must update volume localy when user don't use our remote */
+  if ((millis()-timerToRefreshSonos_ms) > TIMER_REFRESH_SONOS_STATUS_MS)
+  {
+    /* We reset the timer */
+    timerToRefreshSonos_ms = millis();
+
+    currentVolume = sonosDevice.getVolume(sonosDeviceIP);
+
+    Serial.print ("sonosDevice.currentVolume = ");
+    Serial.println ((int)(currentVolume));
+  }
+}
+
+/*-----------------------------------------------------------------------------------------------*/
+void update_play (void)
+{
+  int8_t playButtonState = digitalRead(PIN_IN_PLAY_BUTTON);
+
+  if (playButtonState == BUTTON_PUSHED)
+  {
+    /* Anti rebound check */
+    if (pinPlayButtonLast == BUTTON_RELEASED)
+    {
+      #ifndef _DEBUG_MODE
+        sonosDevice.togglePause(sonosDeviceIP);
+      #endif
+      
+      Serial.println ("sonosDevice.togglePause");
+    }
+  }
+
+  /* Update button status for anti rebound */
+  pinPlayButtonLast = playButtonState;
+}
+
+
+
+/* I N T E R R U P T S ***************************************************************************/
+void IRAM_ATTR interrupt_ky40 (void)
+{
+  int8_t pinCLK = digitalRead(PIN_IN_KY40_CLK);
+  int8_t pinDT  = digitalRead(PIN_IN_KY40_DT);
+
+  if (pinCLK != ky40.pinCLKLast)
+  {    
+    if (pinDT != pinCLK)
+    {
+      ky40.diff++;
+    }
+    else
+    {
+      ky40.diff--;
+    }
+  }
+  
+  ky40.pinCLKLast = pinCLK;
 }
 
 
 /* M A I N  F U N C T I O N S ********************************************************************/
 void setup (void)
 {
+  /* Pin configuration */
   pinMode (PIN_IN_KY40_CLK,   INPUT);
   pinMode (PIN_IN_KY40_DT,    INPUT);
   pinMode (PIN_IN_KY40_BUTTON,INPUT_PULLUP);
+  pinMode (PIN_IN_PLAY_BUTTON,INPUT_PULLUP);
 
+  /* Debug configuration */
   Serial.begin (115200);
-  WiFi.begin (ssid, password);
 
+  /* Wifi configuration to send command to the sonos system */
+  WiFi.begin (ssid, password);
   while (WiFi.status() != WL_CONNECTED)
   {
     delay (500);
     Serial.print (".");
   }
   Serial.println ("connected to WiFi");
+
+  /* Refresh local data */
+  currentVolume = sonosDevice.getVolume(sonosDeviceIP);
+
+  /* Interrupt configuration to monitor rotary usage */
+  attachInterrupt(digitalPinToInterrupt(PIN_IN_KY40_CLK), interrupt_ky40, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_IN_KY40_DT),  interrupt_ky40, CHANGE);
 }
 
 /*-----------------------------------------------------------------------------------------------*/
 void loop (void)
 {
-  int16_t delay_ms = 100;
-  
-  // Not used for the moment
-  //sonosDevice.play (sonosDeviceIP);
-  //sonosDevice.pause (sonosDeviceIP);
-  //sonosDevice.stop (sonosDeviceIP);
-  
-  /* Refresh KY40 rotary data */
-  ky40_refresh ();
+  /* Update different features */
+  update_mute ();
+  update_volume ();
+  update_play ();
 
-  /* Mute button */
-  if (ky40_getButtonStatus() == HIGH)
-  {
-    if (ky40.antiRebound == false)
-    {
-      /* If timer is stoped (0), start it to send data in Xms */
-      if (timerDataTransmit_ms == 0)
-        timerDataTransmit_ms = millis();
-
-      /* Set flag to send data */
-      updateMute = true;
-      
-      ky40.antiRebound = true;
-    }
-  }
-  else
-  {
-    ky40.antiRebound = false;
-  }
-
-  /* Update volume according rotary position */
-  if (ky40_rotaryPositionChanged() == true)
-  {
-    /* If timer is stoped (0), start it to send data in Xms */
-    if (timerDataTransmit_ms == 0)
-      timerDataTransmit_ms = millis();
-
-    /* Set flag to send data */
-    updateVolume = true;
-    
-    /* Set new volume level */
-    currentVolume += (ky40_getRotaryDiff()*STEP_VOLUME);
-
-    if (currentVolume < 0)
-    {
-      currentVolume = 0;
-    }
-  }
-
-  /* No user activity, reduce Arduino activity */
-  if (timerDataTransmit_ms == 0)
-  {
-     /* Refresh local data every Xms */
-    if (elapsedTimeLatestRefreshSonos_ms >= LATEST_REFRESH_SONOS_TIMEOUT_MS)
-    {
-      /* Reset counter and read current volume level */
-      elapsedTimeLatestRefreshSonos_ms = 0;
-      currentVolume = sonosDevice.getVolume(sonosDeviceIP);
-    }
-    else
-    {
-      elapsedTimeLatestRefreshSonos_ms+=delay_ms;
-    }
-    
-    delay(delay_ms);
-  }
-  /* An update was asked by user, timer to do it was reached so do it */
-  else if (timerDataTransmit_ms > 0)
-  {
-    unsigned long ElapsedTime = millis() - timerDataTransmit_ms;
-
-    /* Because update over TCP takes time, we do it every Xms, without blocking action for user experience */
-    if (ElapsedTime >= TIMER_DATA_TRANSMIT_TIMEOUT_MS)
-    {
-      /* Stop the timer */
-      timerDataTransmit_ms = 0;
-      
-      if (updateMute == true)
-      {
-        updateMute = false;
-        
-        #ifndef _DEBUG_MODE
-          sonosDevice.setMute (sonosDeviceIP, !sonosDevice.getMute (sonosDeviceIP));
-        #else
-          Serial.println ("sonosDevice.setMute");
-        #endif
-      }
-  
-      if (updateVolume == true)
-      {      
-        updateVolume = false;
-        
-        #ifndef _DEBUG_MODE
-          sonosDevice.setVolume(sonosDeviceIP, currentVolume);
-        #else
-          Serial.print ("sonosDevice.setVolume = ");
-          Serial.println ((int)(currentVolume));
-        #endif
-      }
-    }
-  }
+  delay(100);
 }
