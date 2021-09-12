@@ -43,7 +43,7 @@
 #define BUTTON_PUSHED                       (0)
 
 /* Sonos settings */
-#define STEP_VOLUME                         (2)
+#define STEP_VOLUME                         (1)
 
 /* Debug mode : if uncommented, do not send command, just display information in the console */
 //#define _DEBUG_MODE

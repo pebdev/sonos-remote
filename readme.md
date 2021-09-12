@@ -72,6 +72,8 @@ If you don't know how to do that, follow this [page](https://www.arduino.cc/en/g
 
 You need support of the ESP32 board too, you can follow this [page](https://circuitdigest.com/microcontroller-projects/programming-esp32-with-arduino-ide).
 
+Note : to avoid compilation issue, use ESP32 software 1.0.4
+
 
 
 ### Configuration ###
